@@ -1,0 +1,51 @@
+name: Publish prices
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-prices
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch prices
+        run: node tools/build.js
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          VERSION="1.0.$(date -u +%Y%m%d%H%M%S).${GITHUB_RUN_ATTEMPT}"
+          sed -i "s/^## Version:.*/## Version: $VERSION/" ForeverPrices.toc
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Prices.lua ForeverPrices.toc
+          git commit -m "Prices $VERSION"
+          git push
+          mkdir -p dist/ForeverPrices
+          cp ForeverPrices.toc ForeverPrices.lua Prices.lua dist/ForeverPrices/
+          cd dist
+          zip -q -r "ForeverPrices-$VERSION.zip" ForeverPrices
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          gh release create "v$VERSION" "dist/ForeverPrices-$VERSION.zip" \
+            --target "$(git rev-parse HEAD)" --title "Forever Prices $VERSION" \
+            --notes "US Forever PvP Horde prices from Undermine Exchange." --latest
