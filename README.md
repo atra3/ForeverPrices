@@ -18,10 +18,19 @@ Prices only display on US PvP Horde characters. No settings, libraries or backgr
 3. Run **Actions → Publish prices → Run workflow** for the first release.
 4. Add the repository URL to WowUp, or install the ZIP from **Releases**.
 
-The workflow downloads this house's current item distributions and publishes a versioned ZIP
-at **00:17, 02:17, …, 22:17 UTC**. GitHub cron can run late; public repositories' schedules
-are disabled after 60 days without repository activity. Re-enable the workflow if that happens.
-Failed downloads or realm snapshots older than six hours do not publish a release.
+The workflow aims to download this house's current item distributions and publish a versioned ZIP
+once per **two-hour UTC window** (00:00–01:59, 02:00–03:59, and so on). It checks at minutes
+**17, 37 and 57 of every hour**, skipping the download and release if a release has already been
+published in the current window. These extra checks give missed triggers and failed builds another
+chance; manual runs always refresh immediately. The gate checks published releases, so a failed
+release can be retried even if its price commit succeeded.
+
+GitHub schedules are best effort: triggers can be delayed or dropped, so this cannot guarantee
+an exact two-hour interval. Use an external scheduler to dispatch the workflow if that is required.
+Check **Actions → Publish prices** for actual runs; commit history only shows builds that reached
+the commit step. Public repositories' schedules are disabled after 60 days without repository
+activity; re-enable the workflow if that happens. Failed downloads or realm snapshots older than
+six hours do not publish a release.
 
 Local refresh: `node tools/build.js` (Node 22+, no npm install).
 Other addons: `ForeverPrices.GetPrice(itemID)` returns minimum, quartile, median, snapshot Unix time,
