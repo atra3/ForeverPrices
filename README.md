@@ -14,23 +14,20 @@ Prices only display on US PvP Horde characters. No settings, libraries or backgr
 1. Create a repository and push **this folder's contents** to its default branch, including `.github`.
 2. Enable GitHub Actions. Allow `contents: write` and Actions pushes to the default branch
    (Settings → Actions → General; branch rules must permit the bot). This commits prices and publishes releases.
-   No API keys, PAT, repository variables or external scheduler are needed.
+   The workflow uses GitHub's built-in token for commits and releases; no repository secrets are needed.
 3. Run **Actions → Publish prices → Run workflow** for the first release.
 4. Add the repository URL to WowUp, or install the ZIP from **Releases**.
 
-The workflow aims to download this house's current item distributions and publish a versioned ZIP
-once per **two-hour UTC window** (00:00–01:59, 02:00–03:59, and so on). It checks at minutes
-**17, 37 and 57 of every hour**, skipping the download and release if a release has already been
-published in the current window. These extra checks give missed triggers and failed builds another
-chance; manual runs always refresh immediately. The gate checks published releases, so a failed
-release can be retried even if its price commit succeeded.
+Automatic refreshes use an external Cloudflare Worker with the Cron Trigger `17 */2 * * *`
+(every two hours, evaluated in UTC). The Worker sends an authenticated POST to GitHub's
+`/repos/atra3/ForeverPrices/actions/workflows/prices.yml/dispatches` endpoint with body
+`{"ref":"main"}`. Store its fine-grained GitHub token in Cloudflare as a secret named
+`GITHUB_TOKEN`, scoped to this repository with **Actions: Read and write** permission.
 
-GitHub schedules are best effort: triggers can be delayed or dropped, so this cannot guarantee
-an exact two-hour interval. Use an external scheduler to dispatch the workflow if that is required.
-Check **Actions → Publish prices** for actual runs; commit history only shows builds that reached
-the commit step. Public repositories' schedules are disabled after 60 days without repository
-activity; re-enable the workflow if that happens. Failed downloads or realm snapshots older than
-six hours do not publish a release.
+The workflow runs only on `workflow_dispatch`, from Cloudflare or **Run workflow** in GitHub.
+Each invocation fetches prices, commits them and publishes a versioned ZIP. Runs are serialized
+to prevent overlapping pushes. Failed downloads or realm snapshots older than six hours do not
+publish a release. Check **Actions → Publish prices** for build results.
 
 Local refresh: `node tools/build.js` (Node 22+, no npm install).
 Other addons: `ForeverPrices.GetPrice(itemID)` returns minimum, quartile, median, snapshot Unix time,
