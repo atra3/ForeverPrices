@@ -28,6 +28,10 @@ The workflow runs only on `workflow_dispatch`, from Cloudflare or **Run workflow
 Each invocation fetches prices, commits them and publishes a versioned ZIP. Runs are serialized
 to prevent overlapping pushes. Failed downloads or realm snapshots older than six hours do not
 publish a release. Check **Actions → Publish prices** for build results.
+HTTP 403 means Undermine Exchange denied the download: the build fails without retrying that
+response or publishing old prices. Logs include a short server response to help diagnose it.
+Temporary network errors, HTTP 408/429 and server errors get up to two retries; `Retry-After`
+is respected, and cooldowns over two minutes are left for the next scheduled build.
 
 Local refresh: `node tools/build.js` (Node 22+, no npm install).
 Other addons: `ForeverPrices.GetPrice(itemID)` returns minimum, quartile, median, snapshot Unix time,

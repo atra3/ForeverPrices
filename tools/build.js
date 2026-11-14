@@ -98,17 +98,43 @@ async function build() {
                     request.on('error', reject);
                     request.on('end', () => {
                         try {
-                            if (headers?.[':status'] !== 200) throw new Error(`HTTP ${headers?.[':status']}: ${url}`);
                             let body = Buffer.concat(chunks);
                             if (headers['content-encoding'] === 'gzip') body = zlib.gunzipSync(body);
+                            const status = headers[':status'];
+                            if (status !== 200) {
+                                // Include useful denial/rate-limit details, never cookies or credentials.
+                                const details = ['server', 'content-type', 'retry-after', 'cf-ray']
+                                    .filter(name => headers[name] !== undefined)
+                                    .map(name => `${name}=${String(headers[name]).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 200)}`);
+                                const text = /^(text\/|application\/(?:json|problem\+json))/i.test(headers['content-type'] || '')
+                                    ? body.toString('utf8').replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 512)
+                                    : '';
+                                const message = [`HTTP ${status}: ${url}`, ...details, text];
+                                if (status === 403) message.push('Undermine Exchange denied access; existing prices are unchanged.');
+                                const error = new Error(message.filter(Boolean).join('; '));
+                                error.statusCode = status;
+                                error.retryAfter = headers['retry-after'];
+                                throw error;
+                            }
                             resolve(body);
                         } catch (error) { reject(error); }
                     });
                     request.end();
                 });
             } catch (error) {
-                if (attempt >= 2 || stopped) throw error;
-                await pause(1000 * (attempt + 1));
+                const status = error.statusCode;
+                const retryable = status === undefined || status === 408 || status === 429 || status >= 500;
+                if (attempt >= 2 || stopped || !retryable) throw error;
+                let delay = 1000 * (attempt + 1);
+                if (error.retryAfter !== undefined) {
+                    const seconds = Number(error.retryAfter);
+                    const requested = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(error.retryAfter) - Date.now();
+                    if (Number.isFinite(requested)) delay = Math.max(delay, requested);
+                }
+                // A long server-requested cooldown belongs to the next scheduled build.
+                if (delay > 120000) throw error;
+                console.warn(`${error.message}; retrying in ${delay / 1000}s (${attempt + 1}/2)`);
+                await pause(delay);
             }
         }
     }
