@@ -8,7 +8,7 @@ local function matchingHouse()
         and not realm:find("roleplay", 1, true)
 end
 
--- Copper per unit. Equipment is grouped by base item ID, like the site's free view.
+-- Copper per unit. Equipment variations are grouped by base item ID.
 function addon.GetPrice(itemID)
     if not matchingHouse() then return end
     local p = addon.prices[itemID]
@@ -22,7 +22,7 @@ TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tool
     local age = math.max(0, time() - updated)
     local ageText = age < 3600 and (math.floor(age / 60) .. "m")
         or (math.floor(age / 3600) .. "h")
-    tooltip:AddLine("Undermine · " .. ageText, 0.65, 0.65, 0.65)
+    tooltip:AddLine("Forever Prices · " .. ageText, 0.65, 0.65, 0.65)
     tooltip:AddDoubleLine("Min buyout", C_CurrencyInfo.GetCoinTextureString(minimum, 12), 0.9, 0.8, 0.5, 1, 1, 1)
     tooltip:AddDoubleLine("25% buyout", C_CurrencyInfo.GetCoinTextureString(quartile, 12), 0.9, 0.8, 0.5, 1, 1, 1)
     tooltip:AddDoubleLine("Median buyout", C_CurrencyInfo.GetCoinTextureString(median, 12), 0.9, 0.8, 0.5, 1, 1, 1)

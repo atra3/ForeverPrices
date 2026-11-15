@@ -2,64 +2,55 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const http2 = require('node:http2');
-const zlib = require('node:zlib');
 
 const root = path.resolve(__dirname, '..');
-const house = 33137; // undermine.exchange/#usf-pvp-horde
-const site = 'https://undermine.exchange';
+// Blizzard's Forever house 113 is US PvP Horde. The ruleset path is an entry point;
+// the house ID selects the actual ruleset/faction (see README's source reference).
+const house = 'https://us.api.blizzard.com/data/wow/ruleset/2/auctions/113';
+const namespace = '?namespace=dynamic-forever-us';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Public binary formats used by undermine.exchange's client (Auctions.ts).
-// Prices encode silver, copper or gold in their top two bits.
-function price(encoded) {
-    const amount = encoded & 0x3fffffff;
-    switch (encoded >>> 30) {
-        case 0: return amount * 100;
-        case 1: return amount;
-        case 2: return amount * 10000;
-        default: throw new Error('Unknown price encoding');
+function snapshotTime(lastModified) {
+    const snapshot = Math.floor(Date.parse(lastModified) / 1000);
+    if (!Number.isFinite(snapshot) || snapshot > Date.now() / 1000 + 300 || Date.now() / 1000 - snapshot > 6 * 3600) {
+        throw new Error('Missing, invalid or stale Blizzard snapshot timestamp; keeping existing prices');
+    }
+    return snapshot;
+}
+
+function addAuctions(rows, data) {
+    if (!Array.isArray(data?.auctions)) throw new Error('Missing Blizzard auctions array');
+    for (const auction of data.auctions) {
+        const id = auction?.item?.id;
+        const quantity = auction?.quantity;
+        if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(quantity) || quantity <= 0) {
+            throw new Error('Invalid auction item or quantity');
+        }
+        let unit;
+        if (auction.unit_price !== undefined) {
+            unit = auction.unit_price;
+        } else {
+            // Equipment/listing buyout is the whole stack; commodities specify unit_price.
+            if (auction.buyout === undefined || auction.buyout === 0) continue; // Bid-only.
+            if (!Number.isSafeInteger(auction.buyout) || auction.buyout < 0) throw new Error('Invalid auction buyout');
+            unit = Math.floor(auction.buyout / quantity);
+        }
+        if (!Number.isSafeInteger(unit) || unit <= 0) throw new Error('Invalid auction unit price');
+        if (!rows.has(id)) rows.set(id, []);
+        // All equipment variations share the base item ID.
+        rows.get(id).push([unit, quantity]);
     }
 }
 
-function readState(buffer) {
-    if (![3, 4].includes(buffer[0])) throw new Error('Unknown realm data version');
-    const snapshot = buffer.readUInt32LE(1);
-    let offset = 11 + buffer.readUInt16LE(9) * 4;
-    const count = buffer.readUInt32LE(offset);
-    offset += 4;
-    const items = [];
-    for (let i = 0; i < count; i++, offset += 20) {
-        const id = buffer.readUInt32LE(offset);
-        const level = buffer.readUInt16LE(offset + 4);
-        const suffix = buffer.readUInt16LE(offset + 6);
-        const quantity = buffer.readUInt32LE(offset + 16);
-        if (!level && !suffix && quantity > 0) items.push(id);
-    }
-    return { snapshot, items: [...new Set(items)].sort((a, b) => a - b) };
-}
-
-function readPrices(buffer) {
-    if (![3, 4, 5].includes(buffer[0])) throw new Error('Unknown item data version');
-    const quantity = buffer.readUInt32LE(9);
-    if (!quantity) return null;
-    const count = buffer.readUInt16LE(13);
-    const auctions = [];
-    let total = 0;
-    for (let i = 0; i < count; i++) {
-        const unit = price(buffer.readUInt32LE(15 + i * 8));
-        const units = buffer.readUInt32LE(19 + i * 8);
-        if (unit <= 0 || units <= 0) throw new Error('Invalid auction price or quantity');
-        auctions.push([unit, units]);
-        total += units;
-    }
-    if (total !== quantity) throw new Error('Incomplete auction distribution');
+function prices(auctions) {
     auctions.sort((a, b) => a[0] - b[0]);
+    const total = auctions.reduce((sum, [, quantity]) => sum + quantity, 0);
+    if (!Number.isSafeInteger(total) || total <= 0) throw new Error('Invalid auction distribution');
     // Weighted nearest rank: the first price reaching 25% / 50% of units.
     const rank25 = Math.ceil(total * 0.25), rank50 = Math.ceil(total * 0.5);
     let seen = 0, quartile, median;
-    for (const [unit, units] of auctions) {
-        seen += units;
+    for (const [unit, quantity] of auctions) {
+        seen += quantity;
         if (quartile === undefined && seen >= rank25) quartile = unit;
         if (seen >= rank50) { median = unit; break; }
     }
@@ -67,71 +58,48 @@ function readPrices(buffer) {
 }
 
 async function build() {
-    let client;
-    let stopped = false;
-    const connections = new Set();
-    function connection() {
-        if (!client || client.closed || client.destroyed) {
-            const current = client = http2.connect(site);
-            connections.add(current);
-            current.on('error', () => current.destroy()); // Streams report the error.
-            current.on('close', () => connections.delete(current));
-            current.on('goaway', () => {
-                if (client === current) client = null;
-                current.close(); // Let active streams finish; new requests reconnect.
-            });
-        }
-        return client;
+    const id = process.env.BLIZZARD_CLIENT_ID;
+    const secret = process.env.BLIZZARD_CLIENT_SECRET;
+    if (!id?.trim() || !secret?.trim()) {
+        throw new Error('Set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in GitHub Actions repository secrets');
     }
-    async function download(url) {
+    const controller = new AbortController();
+    async function download(url, options) {
+        const label = new URL(url).hostname + new URL(url).pathname;
         for (let attempt = 0; ; attempt++) {
-            if (stopped) throw new Error('Build stopped');
             try {
-                return await new Promise((resolve, reject) => {
-                    const request = connection().request({ ':path': url, 'accept-encoding': 'gzip',
-                        'user-agent': 'ForeverPrices/1.0 (personal WoW addon)', referer: site + '/' });
-                    let headers;
-                    const chunks = [];
-                    request.setTimeout(30000, () => request.destroy(new Error('Download timed out')));
-                    request.on('response', value => { headers = value; });
-                    request.on('data', chunk => chunks.push(chunk));
-                    request.on('error', reject);
-                    request.on('end', () => {
-                        try {
-                            let body = Buffer.concat(chunks);
-                            if (headers['content-encoding'] === 'gzip') body = zlib.gunzipSync(body);
-                            const status = headers[':status'];
-                            if (status !== 200) {
-                                // Include useful denial/rate-limit details, never cookies or credentials.
-                                const details = ['server', 'content-type', 'retry-after', 'cf-ray']
-                                    .filter(name => headers[name] !== undefined)
-                                    .map(name => `${name}=${String(headers[name]).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 200)}`);
-                                const text = /^(text\/|application\/(?:json|problem\+json))/i.test(headers['content-type'] || '')
-                                    ? body.toString('utf8').replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 512)
-                                    : '';
-                                const message = [`HTTP ${status}: ${url}`, ...details, text];
-                                if (status === 403) message.push('Undermine Exchange denied access; existing prices are unchanged.');
-                                const error = new Error(message.filter(Boolean).join('; '));
-                                error.statusCode = status;
-                                error.retryAfter = headers['retry-after'];
-                                throw error;
-                            }
-                            resolve(body);
-                        } catch (error) { reject(error); }
-                    });
-                    request.end();
+                const response = await fetch(url, {
+                    ...options,
+                    redirect: 'error',
+                    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]),
                 });
+                if (!response.ok) {
+                    const error = new Error(`Blizzard HTTP ${response.status}: ${label}`);
+                    error.statusCode = response.status;
+                    error.retryAfter = response.headers.get('retry-after');
+                    // Authentication errors can contain sensitive material: never log bodies/headers.
+                    await response.body?.cancel();
+                    throw error;
+                }
+                let data;
+                try { data = await response.json(); }
+                catch {
+                    const error = new Error(`Invalid Blizzard JSON: ${label}`);
+                    error.retryable = false;
+                    throw error;
+                }
+                return { data, lastModified: response.headers.get('last-modified') };
             } catch (error) {
                 const status = error.statusCode;
                 const retryable = status === undefined || status === 408 || status === 429 || status >= 500;
-                if (attempt >= 2 || stopped || !retryable) throw error;
+                if (attempt >= 2 || controller.signal.aborted || error.retryable === false || !retryable) throw error;
                 let delay = 1000 * (attempt + 1);
-                if (error.retryAfter !== undefined) {
+                if (error.retryAfter != null) {
                     const seconds = Number(error.retryAfter);
                     const requested = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(error.retryAfter) - Date.now();
                     if (Number.isFinite(requested)) delay = Math.max(delay, requested);
                 }
-                // A long server-requested cooldown belongs to the next scheduled build.
+                // Respect a longer cooldown by leaving the next attempt to the scheduler.
                 if (delay > 120000) throw error;
                 console.warn(`${error.message}; retrying in ${delay / 1000}s (${attempt + 1}/2)`);
                 await pause(delay);
@@ -139,38 +107,39 @@ async function build() {
         }
     }
     try {
-        const { snapshot, items } = readState(await download(`/data/${house}/state.free.bin`));
-        if (!items.length || snapshot > Date.now() / 1000 + 300 || Date.now() / 1000 - snapshot > 6 * 3600) {
-            throw new Error('Missing or stale realm snapshot; keeping existing prices');
+        const { data: auth } = await download('https://oauth.battle.net/token', {
+            method: 'POST',
+            headers: {
+                Authorization: 'Basic ' + Buffer.from(`${id}:${secret}`).toString('base64'),
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'grant_type=client_credentials',
+        });
+        if (typeof auth?.access_token !== 'string' || !auth.access_token.trim()) {
+            throw new Error('Blizzard authentication returned no access token');
         }
-        console.log(`US PvP Horde: ${items.length} items; snapshot ${new Date(snapshot * 1000).toISOString()}`);
+        const options = { headers: { Authorization: `Bearer ${auth.access_token}`, 'Accept-Encoding': 'gzip' } };
+        const feeds = await Promise.all([
+            download(house + namespace, options),
+            download(house + '/commodities' + namespace, options),
+        ]);
+        // Both feeds must have valid source timestamps, even when one has no auctions.
+        const snapshot = Math.min(...feeds.map(feed => snapshotTime(feed.lastModified)));
         const rows = new Map();
-        let next = 0, done = 0;
-        // Four requests at a time, one house only. No histories or region data.
-        await Promise.all(Array.from({ length: 4 }, async () => {
-            while (next < items.length) {
-                const id = items[next++];
-                const values = readPrices(await download(`/data/${house}/${id & 255}/${id}.bin`));
-                if (values) rows.set(id, values);
-                if (++done % 250 === 0) console.log(`${done}/${items.length}`);
-            }
-        }));
-        if (!rows.size || Date.now() / 1000 - snapshot > 6 * 3600) {
-            throw new Error('Missing or stale prices; keeping existing prices');
-        }
-        const lines = ['-- Generated from Undermine Exchange: US Forever PvP Horde.',
+        for (const feed of feeds) addAuctions(rows, feed.data);
+        if (!rows.size) throw new Error('Missing Blizzard buyout prices; keeping existing prices');
+        const lines = ['-- Generated from Blizzard auction data: US Forever PvP Horde.',
             'local _, addon = ...', `addon.updated = ${snapshot}`, 'addon.prices = {'];
-        for (const id of items) {
-            const values = rows.get(id);
-            if (values) lines.push(`[${id}]={${values.join(',')}},`);
+        for (const id of [...rows.keys()].sort((a, b) => a - b)) {
+            lines.push(`[${id}]={${prices(rows.get(id)).join(',')}},`);
         }
         lines.push('}', '');
-        // Do not touch the working data unless the entire download succeeded.
+        snapshotTime(new Date(snapshot * 1000).toUTCString()); // Recheck after processing.
+        // Keep the current file unless authentication, both downloads and parsing all succeed.
         fs.writeFileSync(path.join(root, 'Prices.lua'), lines.join('\n'));
-        console.log(`Wrote ${rows.size} item prices`);
+        console.log(`US Forever PvP Horde (house 113): wrote ${rows.size} item prices; snapshot ${new Date(snapshot * 1000).toISOString()}`);
     } finally {
-        stopped = true;
-        for (const current of connections) current.destroy();
+        controller.abort();
     }
 }
 

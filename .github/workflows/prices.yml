@@ -22,6 +22,9 @@ jobs:
         with:
           node-version: '22'
       - name: Fetch prices
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
         run: node tools/build.js
       - name: Package
         id: package
@@ -46,4 +49,4 @@ jobs:
         run: |
           gh release create "v$VERSION" "dist/ForeverPrices-$VERSION.zip" \
             --target "$(git rev-parse HEAD)" --title "Forever Prices $VERSION" \
-            --notes "US Forever PvP Horde prices from Undermine Exchange." --latest
+            --notes "US Forever PvP Horde prices from Blizzard's Forever auction API." --latest
