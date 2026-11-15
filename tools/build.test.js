@@ -93,6 +93,17 @@ test('OAuth and two house 113 feeds preserve weighted current buyout prices', as
     assert.doesNotMatch(JSON.stringify([...r.logs, ...r.errors, ...r.warnings]), /TEST_CLIENT_SECRET|TEST_ACCESS_TOKEN/);
 });
 
+test('copied spaces and newlines are removed before authenticating', async () => {
+    const r = await run(undefined, {
+        BLIZZARD_CLIENT_ID: ' \tTEST_CLIENT_ID\r\n',
+        BLIZZARD_CLIENT_SECRET: '\nTEST_CLIENT_SECRET \r\n',
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.calls[0].options.headers.Authorization,
+        'Basic ' + Buffer.from('TEST_CLIENT_ID:TEST_CLIENT_SECRET').toString('base64'));
+    assert.equal(r.writes.length, 1);
+});
+
 test('missing credentials fail before making any network requests', async () => {
     const r = await run(undefined, { BLIZZARD_CLIENT_ID: '  ' });
     failsWithoutWrite(r, /BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET/);

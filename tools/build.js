@@ -58,9 +58,9 @@ function prices(auctions) {
 }
 
 async function build() {
-    const id = process.env.BLIZZARD_CLIENT_ID;
-    const secret = process.env.BLIZZARD_CLIENT_SECRET;
-    if (!id?.trim() || !secret?.trim()) {
+    const id = process.env.BLIZZARD_CLIENT_ID?.trim();
+    const secret = process.env.BLIZZARD_CLIENT_SECRET?.trim();
+    if (!id || !secret) {
         throw new Error('Set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET in GitHub Actions repository secrets');
     }
     const controller = new AbortController();
