@@ -2,7 +2,7 @@
 ## Title: Forever Prices
 ## Notes: US Forever PvP Horde auction prices.
 ## Author: Atra3
-## Version: 1.0.20261124040014.1
+## Version: 1.0.20261124060016.1
 
 Prices.lua
 ForeverPrices.lua
